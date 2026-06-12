@@ -1,26 +1,67 @@
 #!/bin/bash
-# Script de Automatización para Arch Linux - Optimizado para IA (RTX 5060) y Gaming
+# Script Unificado de Instalación Arch Linux - Optimizado para IA (RTX 5060) y Gaming
 # Usuario: Carlos | Hardware: Ryzen 5 9600X, RTX 5060, 16GB RAM, MT7922
 
 set -e # Salir inmediatamente si un comando falla
 
 # ==========================================
-# CONFIGURACIÓN PERSONALIZABLE
+# FASE 1: ENTORNO LIVE USB (Particionado y Montaje)
+# ==========================================
+TARGET_DISK="/dev/nvme0n1"
+
+echo "========================================================"
+echo " ⚠️ ADVERTENCIA CRÍTICA ⚠️"
+echo " Este script BORRARA COMPLETAMENTE el disco: $TARGET_DISK"
+echo " Todos los datos, juegos y sistemas operativos previos se perderán."
+echo "========================================================"
+read -p "¿Estás 100% seguro de que quieres continuar? (Escribe 'SI' en mayúsculas): " CONFIRM
+
+if [ "$CONFIRM" != "SI" ]; then
+    echo "Instalación cancelada por el usuario."
+    exit 1
+fi
+
+echo "[*] 1. Limpiando y particionando $TARGET_DISK..."
+wipefs -a $TARGET_DISK
+sgdisk -Z $TARGET_DISK
+sgdisk -n 1:0:+550M -t 1:ef00 -c 1:"EFI" $TARGET_DISK
+sgdisk -n 2:0:+16G -t 2:8200 -c 2:"Swap" $TARGET_DISK
+sgdisk -n 3:0:0 -t 3:8304 -c 3:"Root" $TARGET_DISK
+
+echo "[*] 2. Formateando particiones..."
+mkfs.fat -F32 ${TARGET_DISK}p1
+mkswap ${TARGET_DISK}p2
+mkfs.ext4 -L "ArchRoot" ${TARGET_DISK}p3
+
+echo "[*] 3. Montando sistemas de archivos..."
+swapon ${TARGET_DISK}p2
+mount ${TARGET_DISK}p3 /mnt
+mkdir -p /mnt/boot
+mount ${TARGET_DISK}p1 /mnt/boot
+
+echo "[*] 4. Instalando sistema base (descargando paquetes, esto puede tardar)..."
+pacstrap -K /mnt base linux linux-firmware sudo nano
+
+echo "[*] 5. Generando fstab..."
+genfstab -U /mnt >> /mnt/etc/fstab
+
+echo "[*] 6. Preparando script de configuración interna (Fase 2)..."
+cat << 'PHASE2_SCRIPT' > /mnt/root/configurar_sistema.sh
+#!/bin/bash
+set -e
+
+# ==========================================
+# CONFIGURACIÓN PERSONALIZABLE (FASE 2)
 # ==========================================
 USER_NAME="carlos"
 USER_PASSWORD="753951"
 ROOT_PASSWORD="753951"
 HOSTNAME="ngamer"
-KEYBOARD_LAYOUT="la-latin1" # O 'es' dependiendo de tu teclado
-TIMEZONE="America/Santiago" # Ajusta a tu país (ej. America/Bogota, America/Argentina/Buenos_Aires)
-LOCALE="es_CL.UTF-8" # Ajusta a tu región (ej. es_CO.UTF-8, es_AR.UTF-8)
-
-# Entorno: 'hyprland' (recomendado, ligero y moderno) o 'xfce4' (más tradicional)
+KEYBOARD_LAYOUT="la-latin1"
+TIMEZONE="America/Santiago"
+LOCALE="es_CL.UTF-8"
 DESKTOP_ENV="hyprland"
 
-# ==========================================
-# 1. CONFIGURACIÓN BASE DEL SISTEMA
-# ==========================================
 echo "[*] Configurando zona horaria y locales..."
 ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
 hwclock --systohc
@@ -37,17 +78,11 @@ cat <<EOF > /etc/hosts
 127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
 EOF
 
-# ==========================================
-# 2. CONFIGURACIÓN DE RED (CRÍTICO PARA MEDIATEK)
-# ==========================================
-echo "[*] Instalando y habilitando NetworkManager (mejor soporte para MediaTek MT7922)..."
+echo "[*] Instalando y habilitando NetworkManager (Mejor soporte para MediaTek MT7922)..."
 pacman -S --noconfirm networkmanager network-manager-applet
 systemctl enable NetworkManager
 
-# ==========================================
-# 3. MICROCODE Y BOOTLOADER
-# ==========================================
-echo "[*] Instalando microcode de AMD y systemd-boot..."
+echo "[*] Instalando microcode de AMD y bootloader..."
 pacman -S --noconfirm amd-ucode
 bootctl install
 
@@ -58,82 +93,69 @@ console-mode max
 editor no
 EOF
 
+# Usamos /dev/nvme0n1p3 directamente para evitar fallos de parsing de blkid en scripts
 cat <<EOF > /boot/loader/entries/arch.conf
 title Arch Linux
 linux /vmlinuz-linux
 initrd /amd-ucode.img
 initrd /initramfs-linux.img
-options root=PARTUUID=$(blkid -s PARTUUID -o value /dev/disk/by-partlabel/root | head -n 1) rw
+options root=/dev/nvme0n1p3 rw
 EOF
-# Nota: Si usaste cfdisk sin etiquetas, reemplaza la línea 'options root=' con:
-# options root=/dev/nvme0n1p3 rw
 
-# ==========================================
-# 4. DRIVERS NVIDIA (BLACKWELL / SERIE 50) Y AUDIO
-# ==========================================
-echo "[*] Instalando drivers NVIDIA de última generación y utilidades..."
-# nvidia-open es el módulo abierto, recomendado para nuevas arquitecturas como Blackwell
+echo "[*] Instalando drivers NVIDIA (Blackwell/Serie 50) y utilidades..."
 pacman -S --noconfirm nvidia-open nvidia-utils lib32-nvidia-utils nvidia-settings vulkan-icd-loader lib32-vulkan-icd-loader
 
-echo "[*] Instalando PipeWire (Audio de baja latencia para juegos/IA)..."
+echo "[*] Instalando PipeWire (Audio de baja latencia)..."
 pacman -S --noconfirm pipewire pipewire-pulse pipewire-alsa pipewire-jack wireplumber
 
-# ==========================================
-# 5. ENTORNO DE ESCRITORIO (OPTIMIZADO PARA 16GB RAM)
-# ==========================================
-echo "[*] Instalando entorno de escritorio ligero..."
-if [ "$DESKTOP_ENV" == "hyprland" ]; then
-    pacman -S --noconfirm hyprland kitty waybar wofi polkit-gnome xdg-desktop-portal-hyprland
-elif [ "$DESKTOP_ENV" == "xfce4" ]; then
-    pacman -S --noconfirm xfce4 xfce4-goodies lightdm lightdm-gtk-greeter
-    systemctl enable lightdm
-fi
+echo "[*] Instalando entorno de escritorio ligero (Hyprland)..."
+pacman -S --noconfirm hyprland kitty waybar wofi polkit polkit-gnome xdg-desktop-portal-hyprland
 
-# ==========================================
-# 6. HERRAMIENTAS DE DESARROLLO, IA Y GAMING
-# ==========================================
-echo "[*] Instalando herramientas esenciales, Docker y soporte de IA..."
+echo "[*] Instalando herramientas de desarrollo, Docker e IA..."
 pacman -S --noconfirm base-devel git curl wget zsh fzf neovim
 pacman -S --noconfirm docker docker-compose
 systemctl enable docker
 
-# Herramientas específicas de IA
+echo "[*] Instalando soporte Python para IA..."
 pacman -S --noconfirm python python-pip python-virtualenv
-# Opcional: ollama (para correr LLMs locales fácilmente)
-# pacman -S --noconfirm ollama
-# systemctl enable ollama
 
-# Gaming
+echo "[*] Instalando herramientas de Gaming..."
 pacman -S --noconfirm steam lutris mangohud lib32-mangohud goverlay
 
-# ==========================================
-# 7. CONFIGURACIÓN DE USUARIO Y SWAP
-# ==========================================
-echo "[*] Creando usuario y configurando sudo..."
+echo "[*] Creando usuario y configurando contraseñas..."
 useradd -m -G wheel,audio,video,storage,optical,docker -s /bin/bash $USER_NAME
 echo "root:$ROOT_PASSWORD" | chpasswd
 echo "$USER_NAME:$USER_PASSWORD" | chpasswd
 
-# Habilitar sudo sin contraseña para wheel (opcional, o usa visudo manualmente después)
+echo "[*] Configurando sudo..."
 echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/wheel
 
-# Ajuste de Swappiness (Crítico para tus 16GB de RAM con IA)
-# Valor 10: usa la swap solo cuando la RAM esté casi llena, evitando lentitud innecesaria
+echo "[*] Ajuste de Swappiness (Crítico para 16GB de RAM con IA)..."
 echo "vm.swappiness=10" >> /etc/sysctl.d/99-sysctl.conf
 
-# ==========================================
-# 8. OPTIMIZACIONES FINALES DE KERNEL
-# ==========================================
 echo "[*] Aplicando parámetros de kernel para NVIDIA y MediaTek..."
 cat <<EOF > /etc/modprobe.d/nvidia.conf
 options nvidia-drm modeset=1 fbdev=1
 EOF
 
-# Forzar el driver de MediaTek para evitar problemas de suspensión
 cat <<EOF > /etc/modprobe.d/mediatek.conf
 options mt7921e disable_aspm=1
 EOF
 
-echo "[*] ¡Instalación completada con éxito!"
-echo "[*] Por favor, ejecuta 'exit' para salir del chroot, luego 'reboot'."
-echo "[*] Recuerda retirar el USB antes de que inicie el sistema."
+echo "[*] ¡Configuración interna completada con éxito!"
+PHASE2_SCRIPT
+
+chmod +x /mnt/root/configurar_sistema.sh
+
+echo "[*] 7. Entrando al entorno chroot para ejecutar la Fase 2..."
+arch-chroot /mnt /root/configurar_sistema.sh
+
+# Limpieza final del script temporal
+rm /mnt/root/configurar_sistema.sh
+
+echo "========================================================"
+echo " 🎉 ¡INSTALACIÓN COMPLETADA CON ÉXITO! 🎉"
+echo " 1. Escribe: reboot"
+echo " 2. Retira el USB inmediatamente."
+echo " 3. Disfruta tu sistema optimizado para IA y Gaming."
+echo "========================================================"
