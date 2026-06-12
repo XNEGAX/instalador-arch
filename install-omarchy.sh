@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# OMARCHY AUTO-INSTALLER
+# OMARCHY AUTO-INSTALLER v2.0
 # Optimizado para: Ryzen 5 9600X + RTX 5060 + 16GB RAM
 # Autor: Carlos
 # Fecha: 2026
@@ -18,13 +18,9 @@ NC='\033[0m' # No Color
 # Variables de configuración
 USERNAME="carlos"
 HOSTNAME="arch-omarchy"
-TIMEZONE="America/Bogota"  # Cambia a tu zona
-LOCALE="es_MX.UTF-8"       # Cambia a tu locale
-KEYMAP="la-latin1"         # Cambia si necesitas otro
-
-# Disco (detectar automáticamente)
-DISK=$(lsblk -d -o NAME,SIZE | grep -E "nvme[0-9]n[0-9]|sd[a-z]" | head -1 | awk '{print "/dev/"$1}')
-echo -e "${BLUE}Disco detectado: ${DISK}${NC}"
+TIMEZONE="America/Bogota"
+LOCALE="es_MX.UTF-8"
+KEYMAP="la-latin1"
 
 # Funciones de utilidad
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -33,12 +29,105 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 # Verificar que se ejecute como root
 if [[ $EUID -ne 0 ]]; then
-   log_error "Este script debe ejecutarse como root"
+   log_error "Este script debe ejecutarse como root (usa sudo)"
 fi
+
+#===============================================================================
+# DETECCIÓN DE DISCO (MEJORADA)
+#===============================================================================
+log_info "Buscando discos disponibles..."
+
+# Si se pasó el disco como argumento, usarlo
+if [ -n "$1" ]; then
+    DISK="$1"
+    log_info "Usando disco proporcionado: ${DISK}"
+else
+    # Detectar discos automáticamente
+    AVAILABLE_DISKS=()
+    
+    # Buscar NVMe
+    for disk in /dev/nvme[0-9]n[0-9]; do
+        if [ -b "$disk" ]; then
+            AVAILABLE_DISKS+=("$disk")
+        fi
+    done
+    
+    # Buscar SATA/SCSI
+    for disk in /dev/sd[a-z]; do
+        if [ -b "$disk" ]; then
+            # Verificar que sea un disco, no una partición
+            if lsblk -d -n -o TYPE "$disk" 2>/dev/null | grep -q "disk"; then
+                AVAILABLE_DISKS+=("$disk")
+            fi
+        fi
+    done
+    
+    # Si no se encontró nada, error
+    if [ ${#AVAILABLE_DISKS[@]} -eq 0 ]; then
+        log_error "No se encontraron discos disponibles. Especifica el disco manualmente: ./script.sh /dev/nvme0n1"
+    fi
+    
+    # Si hay un solo disco, usarlo
+    if [ ${#AVAILABLE_DISKS[@]} -eq 1 ]; then
+        DISK="${AVAILABLE_DISKS[0]}"
+        log_info "Disco único detectado: ${DISK}"
+    else
+        # Múltiples discos - mostrar menú
+        echo -e "${YELLOW}Se encontraron múltiples discos:${NC}"
+        for i in "${!AVAILABLE_DISKS[@]}"; do
+            disk="${AVAILABLE_DISKS[$i]}"
+            size=$(lsblk -d -n -o SIZE "$disk" 2>/dev/null)
+            model=$(cat /sys/block/$(basename "$disk")/device/model 2>/dev/null | xargs || echo "Unknown")
+            echo -e "  ${BLUE}[$i]${NC} $disk - $size - $model"
+        done
+        echo ""
+        read -p "Selecciona el número del disco a usar [0-$(( ${#AVAILABLE_DISKS[@]} - 1 ))]: " selection
+        
+        if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 0 ] || [ "$selection" -ge ${#AVAILABLE_DISKS[@]} ]; then
+            log_error "Selección inválida"
+        fi
+        
+        DISK="${AVAILABLE_DISKS[$selection]}"
+    fi
+fi
+
+# Validar que el disco exista
+if [ ! -b "$DISK" ]; then
+    log_error "El disco $DISK no existe o no es un dispositivo de bloque válido"
+fi
+
+# Mostrar información del disco
+DISK_SIZE=$(lsblk -d -n -o SIZE "$DISK" 2>/dev/null)
+DISK_MODEL=$(cat /sys/block/$(basename "$DISK")/device/model 2>/dev/null | xargs || echo "Unknown")
+
+echo -e "${BLUE}═══════════════════════════════════════════════${NC}"
+echo -e "${BLUE}DISCO SELECCIONADO:${NC}"
+echo -e "  Dispositivo: ${YELLOW}${DISK}${NC}"
+echo -e "  Tamaño: ${YELLOW}${DISK_SIZE}${NC}"
+echo -e "  Modelo: ${YELLOW}${DISK_MODEL}${NC}"
+echo -e "${BLUE}═══════════════════════════════════════════════${NC}"
+echo ""
+read -p "⚠️  ESTO BORRARÁ TODO EL DISCO. ¿Continuar? (escribe 'SI' en mayúsculas): " CONFIRM
+if [ "$CONFIRM" != "SI" ]; then
+    log_error "Instalación cancelada por el usuario"
+fi
+
+# Detectar si es NVMe o SATA para nombrar particiones correctamente
+if [[ "$DISK" == *"nvme"* ]]; then
+    BOOT_PART="${DISK}p1"
+    ROOT_PART="${DISK}p2"
+else
+    BOOT_PART="${DISK}1"
+    ROOT_PART="${DISK}2"
+fi
+
+log_info "Particiones a crear:"
+log_info "  EFI: ${BOOT_PART} (1GB)"
+log_info "  Root: ${ROOT_PART} (resto del disco)"
 
 # Verificar conexión a internet
 log_info "Verificando conexión a internet..."
-ping -c3 google.com > /dev/null 2>&1 || log_error "Sin conexión a internet"
+ping -c3 google.com > /dev/null 2>&1 || log_error "Sin conexión a internet. Conecta por Ethernet o configura Wi-Fi con: iwctl"
 
 # Sincronizar reloj
 log_info "Sincronizando reloj del sistema..."
@@ -52,14 +141,10 @@ log_info "Iniciando particionamiento de ${DISK}..."
 # Limpiar disco (CUIDADO: BORRA TODO)
 wipefs -a ${DISK}
 
-# Crear particiones con cgdisk (automático)
+# Crear particiones con sgdisk
 sgdisk --zap-all ${DISK}
 sgdisk -n1:0:+1G -t1:EF00 -c1:"EFI" ${DISK}
 sgdisk -n2:0:0 -t2:8300 -c2:"Root" ${DISK}
-
-# Particiones creadas
-BOOT_PART="${DISK}p1"
-ROOT_PART="${DISK}p2"
 
 log_info "Particiones creadas:"
 lsblk ${DISK}
@@ -176,6 +261,7 @@ HOSTNAME="${HOSTNAME}"
 TIMEZONE="${TIMEZONE}"
 LOCALE="${LOCALE}"
 KEYMAP="${KEYMAP}"
+DISK="${DISK}"
 
 # Hostname
 echo ${HOSTNAME} > /etc/hostname
@@ -255,7 +341,7 @@ btrfs property set / compression zstd
 su - ${USERNAME} -c "cd /tmp && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg -si --noconfirm"
 
 # Instalar Omarchy
-log_info "Instalando Omarchy..."
+echo "Instalando Omarchy..."
 su - ${USERNAME} -c "cd /tmp && git clone https://github.com/basecamp/omarchy.git && cd omarchy && ./install.sh"
 
 # Configurar Hyprland para NVIDIA
@@ -275,11 +361,13 @@ env = __VK_LAYER_NV_optimus,NVIDIA_only
 EOF
 
 # Crear script de lanzamiento para juegos
+mkdir -p /home/${USERNAME}/.local/bin
 cat > /home/${USERNAME}/.local/bin/nvidia-game.sh << 'EOF'
 #!/bin/bash
 __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only __GLX_VENDOR_LIBRARY_NAME=nvidia "$@"
 EOF
 chmod +x /home/${USERNAME}/.local/bin/nvidia-game.sh
+chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.local
 
 # Configurar Git
 su - ${USERNAME} -c "git config --global user.name 'Carlos'"
@@ -311,7 +399,7 @@ snapper -c root create --description "Initial system installation"
 
 echo "Instalación completada exitosamente!"
 echo "Usuario: ${USERNAME}"
-echo "Contraseña: (debes establecerla)"
+echo "Contraseña: (debes establecerla con passwd)"
 CHROOT_SCRIPT
 
 # Reemplazar variables en el script
@@ -320,6 +408,7 @@ sed -i "s/\${HOSTNAME}/${HOSTNAME}/g" /mnt/root/setup.sh
 sed -i "s/\${TIMEZONE}/${TIMEZONE}/g" /mnt/root/setup.sh
 sed -i "s/\${LOCALE}/${LOCALE}/g" /mnt/root/setup.sh
 sed -i "s/\${KEYMAP}/${KEYMAP}/g" /mnt/root/setup.sh
+sed -i "s|\${DISK}|${DISK}|g" /mnt/root/setup.sh
 
 chmod +x /mnt/root/setup.sh
 
